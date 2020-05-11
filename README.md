@@ -1,6 +1,7 @@
 # virtual-screening-workflow
 ## Code to set up a structure-based virtual screen of a receptor using Schrodinger Glide on a slurm-based cluster (Sherlock at Stanford)
 "vsw-notes-cleaned-up.txt" has more details and notes on job control and submission. 
+You have to make sure to get access to Schrodinger (e.g. at Stanford, here: https://library.stanford.edu/science/software/schrodinger)
 
 ## Workflow of scripts:
 * Make sure to go through each one and change directories and usernames as needed. 
