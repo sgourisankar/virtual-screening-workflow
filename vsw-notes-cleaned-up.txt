@@ -1,0 +1,87 @@
+For running vsw by batch job submission, specify the following glide commands: 
+
+-WAIT 					this will make sure job does not stop until all processes are finished 
+						(needed for not submitting in background and disconnecting)
+						not including -WAIT will make the job submit but then slurm will say completed, but job won't be done
+-HOST "localhost:num_subjobs" 		num_subjobs = (depends on license availability)
+-host_glide "localhost:num_subjobs"
+-host_prime "localhost:numb_subjobs"	in all of these, localhost is specified because then the whole thing can be submitted as a job. 
+						key is to make sure overall job time, -t, is long enough even when whole thing submitted...
+-NJOBS	num_subjobs			not sure if this is really needed. 
+					adding the flag -adjust  will adjust number of subjobs submitted to be in reasonable time - 
+						don't use it unless you're confident of license availability 
+-TMPLAUNCHDIR				
+-OVERWRITE				will overwrite existing files for this job (files for each job are named by input file name)
+-RESTART				will check to see if files exist, and restart the job if so from where it stopped						
+
+And then the following SBATCH configuration, where make sure to set -t long enough, and -n to the number of processors needed...
+	Using -c for cpus or -N for nodes will make the subjobs disconnected and cause them to die for some reason. So just use -n.
+$ sbatch -t 2-00:00:00 -n num_subjobs --mail-user=<email> --mail-type=ALL -o "ligand_tranche-slurm.out" -e "ligand_tranche-slurm.err" \
+	--wrap="ml chemistry schrodinger && $SCHRODINGER/vsw <input file> <options as above>"
+
+How all this works: 
+
+At top level (sbatch), /vsw submitted job can take max 48hrs without invoking --qos long. Only 256 cores can be used at a time on Sherlock. 
+			Therefore the # of ligands submitted must be consistant with finishing all stages of screening <48hrs. 
+			/vsw will split up the ligands into num_subjobs # of subjobs. 
+				(adding -adjust will allow it to exceed -NJOBS for some, like XP, to finish in <=10 hrs) 
+			NJOBS seems to supersede -host_prime "localhost:1", so maybe don't use it if you don't want to exceed licenses. 
+			Each subjob will take 5 licenses (or 6 for XP with descriptor).
+			Each subjob will run on one cpu. 
+			So if I request -n 1 (in SBATCH) and -NJOBS 2, the ligand set submitted will be split in 2 
+				but subjobs will run sequentially on the 1 cpu requested. 
+			If I request -n 2 -NJOBS 2, two subjobs will run in parallel. 
+			If I request -n 2 -NJOBS 1, only one subjob will run with all the ligands, 
+				and it will take only 1 of the 2 cpus requested, so that is a waste. 
+			I saw it takes each subjob (which will run on one cpu):
+					Stage	Min	Sec	Lig	Sec/Lig
+					HTVS	210	12600	25000	0.50
+					SP	360	21600	2500	8.64
+					XP	330	19800	167	118.6
+					MMGBSA	30	1800	50	36		
+			Each stage (from HTVS to SP to XP) takes only 10% of the hits from the previous stage.
+			In between stages there is an "EXPORT" part that takes ~ 5-10mins.  
+			Relevant equations are: 
+			LICENSES = min{cpus,NJOBS} * 5
+			TIME = (Lig * 0.5 + Lig/10 * 8.64 + Lig/100 * 118.6+Lig/1000 * 36)/(min{NJOBS,cpus}) / 3600 [=] hrs
+			TOTAL_LICENSES = LICENSES * sbatch_jobs_submitted
+			
+			We need to keep TOTAL_LICENSES <= 500 (maximum licenses Stanford has is 2000, let's not go overboard)
+				TIME refers to the individual time of a sbatch job and needs to be under 48hrs to be submitted. 
+				TOTAL_LIG  = 8e6. Lig refers to the # of ligands submitted to each sbatch job.  
+			How do we maximize Lig w.r.t. TIME <= 48, TOTAL_LICENCES <= 500 ? 
+				Technically if I maximize, I should submit 6.77M ligands in one sbatch job with -n 100 -NJOBS 100 
+					which will be done in <=48 hrs. (each subjob will have ~ 67K ligands, which will take 47.6hrs)
+			 
+			###
+			However, this may be harder to deal with later if some subjobs fail due to lack of licenses available. 
+			Submitting tranches of 50K ligands with -n 2 -t 2-00:00:00//-NJOBS -2 -host_glide and -host_prime "localhost:2" -adjust took 20-38hrs.
+			It was better to stick with submitting baches of 50K ligands with -n 2 -t 2-00:00:00// -NJOBS 2
+				and submit tranches of 128 jobs at a time with this strategy. 
+				This uses 2 * 5 * 128 = 1280 licenses, maximum. If a job fails due to lack of license, just resubmit it - only 50K to re-do.
+				Or, can submit fewer jobs at a time. 
+				Another problem is that prime takes 8 licenses at a time, but this is of PSP_PLOP, so doesn't add to GLIDE licenses. 
+				
+			To do this, I need to:
+			(DONE)	1. Partition phase_database into correct size subsets with tail +X drug_like_phase.inp | head -n $((Y-X)) >>
+			(DONE)	2. Make .inp files for each subset
+					3. Make sh scripts for each tranche
+			(DONE)		1-500K
+	   		(DONE)		500K-4000K
+			(DONE)		4000K-8050K
+				4. Run each tranche
+			(DONE)		1-500K
+			(DONE)		500K-4000K
+			(DONE)		4000K-8050K
+				5. Merge results with $SCHRODINGER/utilities/glide_merge -o output_pv.maegz -r report_pv.txt *-XP*_pv.maegz 
+					and with *MMGBSA*maegz for prime jobs
+	- Other tips:
+		$ ml chemistry schrodinger # loads schrodinger on sherlock
+		$ $SCHRODINGER/jobcontrol -list -c # for all jobs, -c to display subjobs. 
+		$ $SCHRODINGER/licadmin STAT | egrep 22JUL # | egrep 22JUL to display all licenses being used, use <username> instead of 22JUL for yours. 
+	- Finally, use $SCHRODINGER/utilities/glide_merge -o prot-merge-XP_pv.maegz -r prot-merge-XP_pv.txt *-XP*_pv.maegz 
+		to merge all the poses together. 
+	- Make sure to check for jobs that died and re-do them. 
+	- -noforce does not stop prime jobs for some reason...
+	
+
